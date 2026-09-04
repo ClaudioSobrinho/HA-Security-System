@@ -1,0 +1,96 @@
+# HA automation: interior person detection → push (advanced mode only)
+#
+# Paste into Home Assistant the same way as alarme_perimetro.yaml.
+#
+# This automation is the "advanced" half of the alarm. It only fires
+# for interior cameras (bedroom, living room, garage, etc.) and only
+# when the user has explicitly enabled advanced mode by setting
+# input_text.zona_alarme to a value starting with "internal|".
+#
+# The "advanced mode" gate is checked via a template condition that
+# reads the input_text. The script installer (scripts/install.py)
+# sets up a simple way to flip this from the HA UI: a script that
+# writes the right value, plus an input_boolean mirror if the user
+# wants a toggle-style switch.
+#
+# Why is this not just a second condition on the perimeter alarm?
+# Splitting into a separate automation means a future feature like
+# "per-camera interior enable" can be added without touching the
+# perimeter path, and the cooldown bookkeeping (input_text.zona_alarme)
+# stays independent — a perimeter push and an interior push are
+# tracked separately so a 10-minute perimeter push does not block an
+# interior push and vice versa.
+#
+# # CONFIGURATION
+# # 1. Replace INTERNAL_CAMERAS with your own interior camera list.
+# #    These should NOT appear in alarme_perimetro.yaml's exclude list —
+# #    the perimeter alarm filters them out, this alarm filters to
+# #    ONLY them.
+# # 2. Replace PHONE_1 / PHONE_2 with your mobile_app_* entity ids.
+
+id: alarme_interno_avancado
+alias: Alarm - Interior person detected (advanced mode)
+description: >-
+  Fires when Frigate reports a person on an interior camera AND the
+  user has set input_text.zona_alarme to "internal|<something>".
+  Used for monitoring interior rooms when the user is away or wants
+  extra coverage. Off by default.
+mode: parallel
+max: 10
+
+triggers:
+  - trigger: mqtt
+    topic: frigate/events
+
+conditions:
+  # Only interior cameras
+  - condition: template
+    value_template: >-
+      {{ trigger.payload_json['after']['camera']
+         in INTERNAL_CAMERAS }}
+
+  # Advanced mode must be on
+  - condition: template
+    value_template: >-
+      {{ states('input_text.zona_alarme').startswith('internal|') }}
+
+  # Only person detections
+  - condition: template
+    value_template: "{{ trigger.payload_json['after']['label'] == 'person' }}"
+
+  # Only events that have a clip
+  - condition: template
+    value_template: "{{ trigger.payload_json['after']['has_clip'] | default(false) }}"
+
+actions:
+  - action: notify.PHONE_1
+    data:
+      title: "[ADVANCED] Person detected"
+      message: "{{ trigger.payload_json['after']['camera'] | replace('_', ' ') | title }}"
+      data:
+        video: "/api/frigate/events/{{ trigger.payload_json['after']['id'] }}/clip.mp4"
+        image: "/api/frigate/events/{{ trigger.payload_json['after']['id'] }}/snapshot.jpg"
+        entity_id: "camera.{{ trigger.payload_json['after']['camera'] }}"
+        tag: "person-internal-{{ trigger.payload_json['after']['camera'] }}"
+        group: "alarm"
+        push:
+          sound:
+            name: default
+            critical: false
+            volume: 0.5
+
+  - action: notify.PHONE_2
+    data:
+      title: "[ADVANCED] Person detected"
+      message: "{{ trigger.payload_json['after']['camera'] | replace('_', ' ') | title }}"
+      data:
+        video: "/api/frigate/events/{{ trigger.payload_json['after']['id'] }}/clip.mp4"
+        image: "/api/frigate/events/{{ trigger.payload_json['after']['id'] }}/snapshot.jpg"
+        entity_id: "camera.{{ trigger.payload_json['after']['camera'] }}"
+        tag: "person-internal-{{ trigger.payload_json['after']['camera'] }}"
+        group: "alarm"
+        push:
+          sound:
+            name: default
+            critical: false
+            volume: 0.5
