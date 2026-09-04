@@ -1,0 +1,128 @@
+# Frigate config snippet: improved person-detection precision
+#
+# This is NOT a complete Frigate config. It is a small set of camera
+# settings that reduce the most common false-positive sources when
+# Frigate is run with a Coral EdgeTPU and a generic person detector
+# (yolov8s or similar). Merge these into your existing frigate.yml —
+# do not replace your config with this file.
+#
+# What this addresses
+# -------------------
+# The default Frigate person detector is sensitive enough that it
+# will frequently classify:
+#   - Tree branches and leaves as person
+#   - Shadows of trees and people as person
+#   - Mailbox posts and lamp posts as person
+#   - Small animals (cats, dogs) on indoor furniture as person
+#
+# The settings below suppress those false positives by raising the
+# confidence threshold, requiring multiple consecutive frames before
+# a detection is confirmed, and bounding the box aspect ratio so
+# tall thin objects (posts, branches) are rejected.
+#
+# # CONFIGURATION
+# # 1. Copy the cameras: block into your existing frigate.yml and
+# #    rename the keys to match your actual camera names. The
+# #    placeholder name "your_perimeter_cam" must be replaced.
+# # 2. The motion: / objects: / detect: / snapshots: / record: keys
+# #    shown are MINIMAL — your existing config has more, and those
+# #    lines must be merged, not overwritten.
+# # 3. The coordinates in the masks: lists are in pixels (x1,y1,x2,y2)
+# #    relative to the 1920x1080 detection frame. For a 1280x720
+# #    stream, scale by 1280/1920 and 720/1080. For other resolutions,
+# #    use the Frigate UI mask editor (Settings → Masks) and paste
+# #    the resulting coordinates here.
+# # 4. The zones: block is optional — define zones for areas where
+# #    you want to count persons (e.g. entry_path) and require events
+# #    to overlap the zone before they fire alerts.
+
+mqtt:
+  enabled: true
+  # Your MQTT broker host. The HA Mosquitto add-on listens on the
+  # HA host itself, so this is usually the HA IP. For a separate
+  # broker, set host and port explicitly.
+  host: 127.0.0.1
+  port: 1883
+  topic_prefix: frigate
+  client_id: frigate
+  stats_interval: 60
+
+# Each camera in the perimeter list gets the same block of settings.
+# Repeat this cameras: entry once per camera, renaming the key.
+cameras:
+  your_perimeter_cam:
+    ffmpeg:
+      inputs:
+        - path: rtsp://CAMERA_USER:CAMERA_PASS@CAMERA_IP:554/stream1
+          # Replace with your camera's RTSP URL. Common formats:
+          #   Tapo:  rtsp://user:pass@CAMERA_IP:554/stream1
+          #   Reolink: rtsp://admin:pass@CAMERA_IP:554/h264Preview_01_main
+          #   Hikvision: rtsp://admin:pass@CAMERA_IP:554/Streaming/Channels/101
+          roles:
+            - detect
+            - record
+            - snapshots
+    detect:
+      width: 1920
+      height: 1080
+      fps: 5
+    motion:
+      # Threshold: lower = more sensitive. 0.015 is the default; 0.02
+      # cuts out a lot of vegetation jitter on windy days without
+      # missing real motion.
+      threshold: 0.02
+      # Optional: mask out a fixed region of the frame from motion
+      # detection. Pixel coords relative to 1920x1080.
+      mask:
+        # Top-right corner: trees and sky that flutter
+        - 1700,0,1920,0,1920,540,1700,540
+    objects:
+      # Per-label filters. These are the most impactful settings for
+      # reducing false positives.
+      filters:
+        person:
+          # Minimum confidence to start tracking. 0.5 is the default;
+          # 0.65 cuts roughly half the vegetation false positives
+          # without dropping real persons.
+          min_score: 0.65
+          # Threshold to consider a detection confirmed. Should be
+          # >= min_score. 0.65 here means "show me the snapshot when
+          # you're at least 65% sure it's a person".
+          threshold: 0.65
+          # Require this many consecutive frames before the detection
+          # is considered real. 3 frames at 5 fps = 0.6 seconds of
+          # consistent detection. Most false positives flicker
+          # and don't last 3 frames.
+          min_frames: 3
+          # Reject detections whose bounding box aspect ratio is
+          # outside this range. Width:height for a standing person
+          # is roughly 0.4-0.6; a flag pole is 0.05-0.15. Default
+          # min_ratio is 0; default max_ratio is unlimited, which
+          # lets tree branches become "persons". 4.0 is a safe cap.
+          min_ratio: 0.2
+          max_ratio: 4.0
+      # Optional: hard-mask a region of the frame from person
+      # detection. Use this for a tree that pokes into the frame
+      # from the right edge — every time it sways, Frigate thinks
+      # it's a person.
+      mask:
+        # Right-edge tree band, scaled for 1920x1080
+        - 1700,0,1920,0,1920,540,1700,540
+    zones:
+      entry_path:
+        # Coordinates of a polygon for the area where persons are
+        # expected to be. (x1,y1, x2,y2, x3,y3, x4,y4) — clockwise.
+        coordinates: 100,800,1800,800,1800,1080,100,1080
+        objects:
+          - person
+    # required_zones is a global review setting (see review: block
+    # below) — events that do not overlap the listed zones will not
+    # trigger notifications. Use it to silence tree-mistakes that
+    # still get past the mask.
+
+review:
+  alerts:
+    # Events outside the listed zones are NOT pushed to the user.
+    # Uncomment and adjust if you want to use this gate.
+    # required_zones:
+    #   - entry_path
