@@ -1,0 +1,7 @@
+# Runtime dependencies for the installer and clip annotator.
+# Pin to minor versions to avoid breaking changes; major bumps are
+# expected to be a deliberate upgrade.
+
+requests>=2.31,<3
+Pillow>=10.0,<12
+pyyaml>=6.0,<7
