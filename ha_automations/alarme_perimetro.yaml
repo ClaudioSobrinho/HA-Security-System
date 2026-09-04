@@ -1,0 +1,120 @@
+# HA automation: perimeter person detection → push
+#
+# Paste this into your Home Assistant instance under Settings → Automations
+# → Create automation → use the visual editor's "Edit YAML" toggle.
+# Alternatively, drop the file at /config/automations/alarme_perimetro.yaml
+# and add an entry in automations.yaml that includes it.
+#
+# This automation reacts to Frigate "end" events on the MQTT topic
+# `frigate/events`. When a person is detected on a perimeter camera, it
+# sends a push notification to all mobile_app_* notify services, with a
+# video clip embedded as a preview thumbnail (iOS Companion app supports
+# this directly).
+#
+# Required entities / helpers (created by scripts/install.py):
+#   - input_boolean.alarme_interno         # the master arm/disarm switch
+#   - input_text.zona_alarme               # cooldown bookkeeping
+#   - one notify.mobile_app_* per phone
+#
+# # CONFIGURATION
+# # 1. Replace PERIMETER_CAMERAS below with your own list of camera names.
+# #    These are the Frigate camera names (not the HA camera.* entity ids).
+# # 2. Replace INTERNAL_CAMERAS below with the cameras that should NEVER
+# #    trigger this automation (bedroom, living room, garage, etc.).
+# # 3. Adjust COOLDOWN_SECONDS if 600 (10 min) is too long or too short.
+# # 4. Replace PHONE_1 / PHONE_2 with your mobile_app_* entity ids.
+
+id: alarme_perimetro
+alias: Alarm - Perimeter person detected
+description: >-
+  Fires when Frigate reports a person on a perimeter camera. Sends a
+  push notification with an inline video preview. Suppresses repeated
+  events on the same camera for COOLDOWN_SECONDS so a person loitering
+  in frame does not spam notifications.
+mode: parallel
+max: 10
+
+triggers:
+  - trigger: mqtt
+    topic: frigate/events
+    # Frigate publishes a "new" event when the detection starts and an
+    # "end" event when the clip has finished encoding. We trigger on
+    # "end" only — pushing on "new" hits 404s because the clip file
+    # is still being written.
+
+conditions:
+  # Only perimeter cameras
+  - condition: template
+    value_template: >-
+      {{ trigger.payload_json['after']['camera']
+         not in INTERNAL_CAMERAS }}
+
+  # Master alarm must be on
+  - condition: state
+    entity_id: input_boolean.alarme_interno
+    state: 'on'
+
+  # Only person detections
+  - condition: template
+    value_template: "{{ trigger.payload_json['after']['label'] == 'person' }}"
+
+  # Only events that have a clip
+  - condition: template
+    value_template: "{{ trigger.payload_json['after']['has_clip'] | default(false) }}"
+
+  # Per-camera cooldown: if the most recent push was for the same camera
+  # within COOLDOWN_SECONDS, suppress this one.
+  - condition: template
+    value_template: >-
+      {% set cooldown = COOLDOWN_SECONDS %}
+      {% set camera = trigger.payload_json['after']['camera'] %}
+      {% set state = states('input_text.zona_alarme') %}
+      {% if state and '|' in state %}
+        {% set last_cam, last_ts = state.split('|', 1) %}
+        {% set last_cam_normalized = last_cam | lower | replace(' ', '_') %}
+        {% set age = (now().timestamp() - (last_ts | float(0))) %}
+        {{ not (last_cam_normalized == camera and age < cooldown) }}
+      {% else %}
+        {{ true }}
+      {% endif %}
+
+actions:
+  # 1. Bookkeeping: stamp the cooldown
+  - action: input_text.set_value
+    target:
+      entity_id: input_text.zona_alarme
+    data:
+      value: "{{ trigger.payload_json['after']['camera'] }}|{{ now().timestamp() }}"
+
+  # 2. Push to all phones with inline video preview
+  - action: notify.PHONE_1
+    data:
+      title: "Person detected"
+      message: "{{ trigger.payload_json['after']['camera'] | replace('_', ' ') | title }}"
+      data:
+        video: "/api/frigate/events/{{ trigger.payload_json['after']['id'] }}/clip.mp4"
+        image: "/api/frigate/events/{{ trigger.payload_json['after']['id'] }}/snapshot.jpg"
+        entity_id: "camera.{{ trigger.payload_json['after']['camera'] }}"
+        tag: "person-{{ trigger.payload_json['after']['camera'] }}"
+        group: "alarm"
+        push:
+          sound:
+            name: default
+            critical: false
+            volume: 0.5
+
+  - action: notify.PHONE_2
+    data:
+      title: "Person detected"
+      message: "{{ trigger.payload_json['after']['camera'] | replace('_', ' ') | title }}"
+      data:
+        video: "/api/frigate/events/{{ trigger.payload_json['after']['id'] }}/clip.mp4"
+        image: "/api/frigate/events/{{ trigger.payload_json['after']['id'] }}/snapshot.jpg"
+        entity_id: "camera.{{ trigger.payload_json['after']['camera'] }}"
+        tag: "person-{{ trigger.payload_json['after']['camera'] }}"
+        group: "alarm"
+        push:
+          sound:
+            name: default
+            critical: false
+            volume: 0.5
